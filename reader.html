@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>沉浸式阅读</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.1.5/jszip.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/epubjs/dist/epub.min.js"></script>
+
+    <style>
+        /* ========================
+           样式：锁定布局，防止抖动
+           ======================== */
+        * { box-sizing: border-box; }
+        
+        body, html { 
+            margin: 0; padding: 0; 
+            height: 100%; 
+            overflow: hidden; /* 禁止 body 滚动，只让 viewer 滚动 */
+            font-family: "Microsoft YaHei", "PingFang SC", sans-serif;
+            background-color: #faf9de; 
+            color: #333;
+        }
+
+        #layout { 
+            display: flex; 
+            height: 100%; /* 这里不写 100vh，依靠 JS 锁定高度 */
+            width: 100vw; 
+        }
+        
+        /* 侧边栏 */
+        #sidebar { 
+            width: 260px; background: #f0efd6; border-right: 1px solid #d8d6b9; 
+            display: flex; flex-direction: column; flex-shrink: 0;
+            transition: transform 0.3s ease; /* 改用 transform 性能更好 */
+            position: relative; z-index: 20;
+        }
+        /* 移动端适配：侧边栏改为浮动覆盖 */
+        @media (max-width: 768px) {
+            #sidebar { position: fixed; left: 0; top: 0; bottom: 0; transform: translateX(-100%); }
+            #sidebar.open { transform: translateX(0); }
+        }
+        /* 桌面端适配：默认显示，closed 类隐藏 */
+        @media (min-width: 769px) {
+            #sidebar.closed { display: none; }
+        }
+
+        .sidebar-header { padding: 15px; border-bottom: 1px solid #d8d6b9; font-weight: bold; display: flex; justify-content: space-between; align-items: center; }
+        #toc-list { flex: 1; overflow-y: auto; -webkit-overflow-scrolling: touch; }
+        .toc-item { padding: 12px 15px; border-bottom: 1px solid #e0dfc6; cursor: pointer; font-size: 14px; }
+        
+        /* 主区域 */
+        #main { flex: 1; display: flex; flex-direction: column; position: relative; width: 100%; }
+        
+        .toolbar { 
+            height: 50px; background: #f0efd6; border-bottom: 1px solid #d8d6b9; 
+            display: flex; align-items: center; justify-content: space-between; padding: 0 15px;
+            flex-shrink: 0; /* 防止工具栏被压缩 */
+        }
+        
+        /* 阅读器核心：绝对定位锁定，防止被挤压 */
+        #viewer { 
+            flex: 1; 
+            width: 100%; 
+            overflow-y: auto; /* 允许滚动 */
+            padding: 0 10px;
+            -webkit-overflow-scrolling: touch; /* iOS 丝滑滚动 */
+            position: relative;
+        }
+
+        /* 按钮 */
+        button { background: transparent; border: 1px solid #bbb; color: #555; padding: 5px 10px; border-radius: 4px; }
+        
+        /* 悬浮按钮 */
+        .float-btn { 
+            position: fixed; right: 20px; width: 45px; height: 45px; border-radius: 50%; 
+            background: #f0efd6; border: 1px solid #d8d6b9; font-size: 20px; 
+            display: flex; align-items: center; justify-content: center; z-index: 99; 
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1); 
+        }
+        #btn-next { bottom: 60px; }
+        #btn-prev { bottom: 120px; }
+    </style>
+</head>
+<body>
+
+<div id="layout">
+    <div id="sidebar" class="closed">
+        <div class="sidebar-header">
+            <span>目录</span> <span onclick="toggleSidebar()" style="font-size:24px;">×</span>
+        </div>
+        <div id="toc-list"></div>
+    </div>
+
+    <div id="main">
+        <div class="toolbar">
+            <button onclick="toggleSidebar()">☰ 目录</button>
+            <span id="book-title" style="font-weight:bold; overflow:hidden; white-space:nowrap; max-width:50%; font-size:14px;">加载中...</span>
+            <button onclick="location.href='index.html'">退出</button>
+        </div>
+        <div id="viewer"></div>
+        <button class="float-btn" id="btn-prev" onclick="scrollPage(-1)">↑</button>
+        <button class="float-btn" id="btn-next" onclick="scrollPage(1)">↓</button>
+    </div>
+</div>
+
+<script>
+    const params = new URLSearchParams(window.location.search);
+    const bookUrl = params.get('book');
+    if(!bookUrl) location.href="index.html";
+
+    // ==========================================
+    // 核心修复 1：锁定高度，防止地址栏伸缩导致回弹
+    // ==========================================
+    const viewerEl = document.getElementById('viewer');
+    const layoutEl = document.getElementById('layout');
+    
+    // 初始化时强制设置高度为像素值，而不是 100%
+    function lockLayoutHeight() {
+        layoutEl.style.height = window.innerHeight + 'px';
+    }
+    lockLayoutHeight();
+
+    // 只有当宽度改变（横竖屏切换/PC窗口拉伸）时，才重置高度
+    // 仅仅是高度改变（手机地址栏收起）时，忽略之！
+    let lastWidth = window.innerWidth;
+    window.addEventListener('resize', () => {
+        if (window.innerWidth !== lastWidth) {
+            lastWidth = window.innerWidth;
+            lockLayoutHeight();
+            // 只有宽度变了才通知 epub.js 重绘，防止乱跳
+            rendition.resize(); 
+        }
+    });
+
+    // ==========================================
+    // 初始化阅读器
+    // ==========================================
+    const book = ePub(bookUrl);
+    const rendition = book.renderTo("viewer", {
+        width: "100%", 
+        height: "100%", 
+        flow: "scrolled-doc", 
+        manager: "continuous",
+        allowScriptedContent: true
+    });
+
+    // 加载进度
+    const savedCfi = localStorage.getItem(bookUrl);
+    rendition.display(savedCfi || undefined).then(() => {
+        console.log("渲染成功");
+        // 注入护眼样式
+        rendition.themes.default({
+            "p": { "font-family": "Microsoft YaHei", "font-size": "18px", "line-height": "1.8" },
+            "body": { "padding": "0 5px" }
+        });
+    });
+
+    // ==========================================
+    // 核心修复 2：进度保存防抖
+    // ==========================================
+    let saveTimer;
+    rendition.on("relocated", location => {
+        // 滚动时不立即保存，停止滚动 1秒 后再保存
+        // 避免还没看完就疯狂触发保存，导致逻辑冲突
+        clearTimeout(saveTimer);
+        saveTimer = setTimeout(() => {
+            localStorage.setItem(bookUrl, location.start.cfi);
+        }, 1000); 
+    });
+
+    // 目录加载
+    book.loaded.navigation.then(toc => {
+        const list = document.getElementById("toc-list");
+        function renderToc(items) {
+            items.forEach(chapter => {
+                let div = document.createElement("div");
+                div.className = "toc-item";
+                div.innerText = chapter.label.trim();
+                div.onclick = () => {
+                    rendition.display(chapter.href);
+                    toggleSidebar(); // 点击后自动关目录
+                };
+                list.appendChild(div);
+                if(chapter.subitems) renderToc(chapter.subitems);
+            });
+        }
+        renderToc(toc);
+    });
+
+    book.loaded.metadata.then(meta => document.getElementById("book-title").innerText = meta.title);
+
+    // 翻页逻辑
+    function scrollPage(dir) {
+        viewerEl.scrollBy({ top: dir * window.innerHeight * 0.8, behavior: 'smooth' });
+    }
+
+    // 侧边栏开关逻辑（兼容手机和PC）
+    function toggleSidebar() {
+        const sidebar = document.getElementById('sidebar');
+        if (window.innerWidth <= 768) {
+            sidebar.classList.toggle('open');
+        } else {
+            sidebar.classList.toggle('closed');
+        }
+    }
+</script>
+</body>
+</html>
