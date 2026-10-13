@@ -47,5 +47,12 @@
     "author": "刘慈欣",
     "url": "books/三体.epub",
     "cover": "books/三体.png"
+  },
+   {
+    "id": 8,
+    "title": "都柏林人",
+    "author": "詹姆斯·乔伊斯",
+    "url": "books/dblr.epub",
+    "cover": "books/dblr.png"
   }
 ]
